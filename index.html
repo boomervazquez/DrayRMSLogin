@@ -1907,67 +1907,98 @@
 
     <script>
     /* ================================================================
-       AUTHENTICATION
+       AUTHENTICATION — Google Apps Script Backend
        ================================================================
-       USER MANAGEMENT:
-       To add or remove users, edit the AUTH_USERS array below.
-       Each entry has a "username" and "password" field.
-       Passwords are stored in plain text here — this is a client-side
-       gate suitable for internal tools. For higher security, move to
-       a server-side solution.
+       Credentials are stored in a private Google Sheet and validated
+       server-side via a Google Apps Script Web App. No usernames or
+       passwords are stored in this file or visible in Inspect Element.
+
+       SETUP: Paste your deployed Apps Script Web App URL below.
        ================================================================ */
-    const AUTH_USERS = [
-        { username: "admin",   password: "kapex2026" },
-        { username: "nyc",     password: "nyc2026" },
-        { username: "ord",     password: "ord2026" },
-        { username: "mia",     password: "mia2026" },
-        { username: "pnw",     password: "pnw2026" },
-        { username: "lax",     password: "lax2026" },
-        { username: "sfo",     password: "sfo2026" },
-        // Add more users here:
-        // { username: "newuser", password: "newpassword" },
-    ];
+
+    // ▼▼▼ PASTE YOUR APPS SCRIPT WEB APP URL HERE ▼▼▼
+    const AUTH_ENDPOINT = 'https://script.google.com/macros/s/AKfycbyRoSCjglA8FF5bsnEOe0PkOBiR2Zrv5nmagX5rULHaoLfNakhfV3QfpVc8eWJyIGTiQg/exec';
+    // ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
     const AUTH_SESSION_KEY = 'kapex_rms_session';
-    const AUTH_SESSION_DURATION_HOURS = 12; // Session expires after this many hours
+    const AUTH_SESSION_DURATION_HOURS = 12;
+
+    // SHA-256 hash using the browser's native SubtleCrypto API
+    async function sha256(message) {
+        const msgBuffer = new TextEncoder().encode(message);
+        const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    }
 
     function auth_isLoggedIn() {
         try {
             const raw = localStorage.getItem(AUTH_SESSION_KEY);
             if (!raw) return false;
             const session = JSON.parse(raw);
-            if (!session || !session.username || !session.expiry) return false;
+            if (!session || !session.name || !session.expiry) return false;
             if (Date.now() > session.expiry) {
                 localStorage.removeItem(AUTH_SESSION_KEY);
                 return false;
             }
-            return session.username;
+            return session.name;
         } catch (e) {
             return false;
         }
     }
 
-    function auth_login() {
-        const username = document.getElementById('loginUsername').value.trim().toLowerCase();
-        const password = document.getElementById('loginPassword').value;
-        const errorEl = document.getElementById('loginError');
+    async function auth_login() {
+        const username  = document.getElementById('loginUsername').value.trim().toLowerCase();
+        const password  = document.getElementById('loginPassword').value;
+        const errorEl   = document.getElementById('loginError');
+        const btn       = document.querySelector('.login-btn');
 
-        const match = AUTH_USERS.find(u =>
-            u.username.toLowerCase() === username && u.password === password
-        );
-
-        if (match) {
-            const expiry = Date.now() + AUTH_SESSION_DURATION_HOURS * 60 * 60 * 1000;
-            localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify({
-                username: match.username,
-                expiry: expiry
-            }));
-            errorEl.classList.remove('show');
-            auth_showApp(match.username);
-        } else {
+        if (!username || !password) {
+            errorEl.textContent = 'Please enter both username and password.';
             errorEl.classList.add('show');
-            document.getElementById('loginPassword').value = '';
-            document.getElementById('loginPassword').focus();
+            return;
+        }
+
+        // Show loading state
+        btn.disabled = true;
+        btn.textContent = 'Signing in...';
+        errorEl.classList.remove('show');
+
+        try {
+            // Hash the password in the browser before sending — the plain-text
+            // password never leaves the device over the network.
+            const passwordHash = await sha256(password);
+
+            const response = await fetch(AUTH_ENDPOINT, {
+                method: 'POST',
+                headers: { 'Content-Type': 'text/plain' },
+                body: JSON.stringify({ username: username, password: passwordHash })
+            });
+
+            if (!response.ok) throw new Error('Network error (' + response.status + ')');
+
+            const result = await response.json();
+
+            if (result.success) {
+                const expiry = Date.now() + AUTH_SESSION_DURATION_HOURS * 60 * 60 * 1000;
+                localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify({
+                    name: result.name || username,
+                    expiry: expiry
+                }));
+                auth_showApp(result.name || username);
+            } else {
+                errorEl.textContent = result.error || 'Incorrect username or password.';
+                errorEl.classList.add('show');
+                document.getElementById('loginPassword').value = '';
+                document.getElementById('loginPassword').focus();
+            }
+        } catch (err) {
+            errorEl.textContent = 'Could not reach authentication server. Check your connection.';
+            errorEl.classList.add('show');
+            console.error('Auth error:', err);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = 'Sign In';
         }
     }
 
@@ -1980,15 +2011,15 @@
         document.getElementById('headerUserInfo').textContent = '';
     }
 
-    function auth_showApp(username) {
+    function auth_showApp(displayName) {
         document.getElementById('loginWall').classList.remove('active');
-        document.getElementById('headerUserInfo').textContent = 'Signed in as ' + username;
+        document.getElementById('headerUserInfo').textContent = 'Signed in as ' + displayName;
     }
 
     function auth_init() {
-        const loggedInUser = auth_isLoggedIn();
-        if (loggedInUser) {
-            auth_showApp(loggedInUser);
+        const loggedInName = auth_isLoggedIn();
+        if (loggedInName) {
+            auth_showApp(loggedInName);
         } else {
             document.getElementById('loginWall').classList.add('active');
         }
@@ -2007,7 +2038,7 @@
        Change this date whenever you update rates, FSC, or other data.
        Format: "Month Day, Year"  (e.g., "February 26, 2026")
        ================================================================ */
-    const LAST_UPDATED = "March 10, 2026";
+    const LAST_UPDATED = "February 26, 2026";
 
     /* ================================================================
        FUEL SURCHARGE CONFIGURATION
